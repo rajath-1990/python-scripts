@@ -41,6 +41,7 @@ def detect_language(filename):
         'c': 'c', 'cpp': 'cpp', 'cc': 'cpp', 'cxx': 'cpp', 'h': 'cpp', 'hpp': 'cpp',
         'rb': 'ruby', 'go': 'go', 'rs': 'rust', 'php': 'php',
         'cs': 'csharp', 'sql': 'sql', 'vue': 'vue',
+        'graphql': 'graphql', 'graphqls': 'graphql',
     }
     
     language = language_map.get(ext.lower(), 'unknown')
@@ -1065,6 +1066,103 @@ def compress_groovy(content):
     return '\n'.join(extracted)
 
 
+def compress_graphql(content):
+    """
+    Light compression for GraphQL files (Apollo Kotlin).
+    Strips comments and normalizes whitespace while preserving all structure.
+    
+    Removes:
+    - Single-line comments (#)
+    - Multi-line docstrings (triple quotes)
+    - Excessive blank lines
+    - Trailing whitespace
+    
+    Preserves:
+    - All type definitions with full field details
+    - All query/mutation/subscription operations with full selection sets
+    - All fragments with full field selections
+    - Directives and their arguments
+    - Variable definitions
+    """
+    lines = content.split('\n')
+    result = []
+    in_docstring = False
+    prev_blank = False
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        
+        #handle multi-line docstrings (""")
+        if in_docstring:
+            if '"""' in stripped:
+                in_docstring = False
+            i += 1
+            continue
+        
+        #check for docstring start
+        if stripped.startswith('"""'):
+            if stripped.count('"""') >= 2:
+                #single-line docstring, skip it
+                i += 1
+                continue
+            else:
+                #multi-line docstring starts
+                in_docstring = True
+                i += 1
+                continue
+        
+        #skip single-line comments
+        if stripped.startswith('#'):
+            i += 1
+            continue
+        
+        #handle inline comments (remove comment portion)
+        if '#' in stripped:
+            #check if # is inside a string (basic check)
+            quote_count = stripped.count('"')
+            hash_pos = stripped.find('#')
+            #simple heuristic: if even number of quotes before #, it's a comment
+            before_hash = stripped[:hash_pos]
+            if before_hash.count('"') % 2 == 0:
+                stripped = stripped[:hash_pos].rstrip()
+                if not stripped:
+                    i += 1
+                    continue
+        
+        #skip empty lines but allow one blank line between blocks
+        if not stripped:
+            if not prev_blank and result:
+                result.append('')
+                prev_blank = True
+            i += 1
+            continue
+        
+        prev_blank = False
+        
+        #preserve the line with original indentation
+        #but normalize excessive internal whitespace for long lines
+        if len(line) > 120:
+            #normalize whitespace in very long lines
+            normalized = re.sub(r'[ \t]+', ' ', line)
+            result.append(normalized.rstrip())
+        else:
+            result.append(line.rstrip())
+        
+        i += 1
+    
+    #remove trailing blank lines
+    while result and not result[-1]:
+        result.pop()
+    
+    #remove leading blank lines
+    while result and not result[0]:
+        result.pop(0)
+    
+    return '\n'.join(result)
+
+
 def compress_content(content, language):
     """
     Compress content based on language.
@@ -1081,6 +1179,7 @@ def compress_content(content, language):
         'aidl': compress_aidl,
         'gradle': compress_groovy,
         'groovy': compress_groovy,
+        'graphql': compress_graphql,
     }
     
     compressor = compressors.get(language)
@@ -1246,6 +1345,7 @@ Examples:
   %(prog)s /path/to/project --compress --filter-ext kt kts
   %(prog)s . --compress --max-tokens 30000
   %(prog)s /path/to/project --include-tree --filter-ext kt java xml
+  %(prog)s /path/to/project --compress --filter-ext kt graphql graphqls
 
 Compress mode extracts only structural elements:
   - Class/object/interface declarations
@@ -1265,6 +1365,8 @@ Supported languages for compression:
   - Python (.py)
   - AIDL (.aidl)
   - Gradle/Groovy (.gradle, .groovy)
+  - GraphQL (.graphql, .graphqls) - Apollo Kotlin support
+    * Light compression: strips comments/docstrings, preserves all fields
 '''
     )
     parser.add_argument(
