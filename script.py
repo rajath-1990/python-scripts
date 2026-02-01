@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 """
-Script to copy code files with automatic chunking for AI token limits.
-Usage: python copy_code_snippets_chunked.py [folder_path] [options]
-
-Compress mode extracts only structural elements:
-- Class names and declarations
-- Function/method definitions (signatures)
-- Interface definitions
-- Return statements
 """
 
 import os
@@ -16,6 +8,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 import argparse
+from collections import defaultdict
 
 
 def detect_language(filename):
@@ -64,7 +57,190 @@ def detect_language(filename):
 
 
 #=============================================================================
-#compress mode functions - extract structural elements only
+#directory tree generation - ai-friendly project structure
+#=============================================================================
+
+def generate_directory_tree(files, base_path, max_depth=None):
+    """
+    Generate ASCII tree structure from processed files.
+    Only shows directories that contain matched files.
+    
+    Args:
+        files: list of Path objects (files that will be processed)
+        base_path: Path to the root folder
+        max_depth: maximum depth to display (None = unlimited)
+    
+    Returns:
+        string containing ASCII tree representation
+    """
+    if not files:
+        return ""
+    
+    #build directory structure from file paths
+    #key: relative directory path, value: list of filenames
+    dir_structure = defaultdict(list)
+    
+    for file_path in files:
+        try:
+            relative = file_path.relative_to(base_path)
+            parent = str(relative.parent).replace('\\', '/')
+            if parent == '.':
+                parent = ''
+            dir_structure[parent].append(relative.name)
+        except ValueError:
+            #file not under base_path
+            dir_structure[''].append(file_path.name)
+    
+    #build tree structure
+    tree_lines = []
+    root_name = base_path.name or 'project'
+    tree_lines.append(f"{root_name}/")
+    
+    #get all unique directory paths and sort them
+    all_dirs = set()
+    for dir_path in dir_structure.keys():
+        if dir_path:
+            parts = dir_path.split('/')
+            for i in range(len(parts)):
+                all_dirs.add('/'.join(parts[:i+1]))
+    
+    #sort directories for consistent output
+    sorted_dirs = sorted(all_dirs)
+    
+    #track which directories we've already output
+    output_dirs = set()
+    
+    def get_depth(path):
+        """Get depth of a path."""
+        if not path:
+            return 0
+        return len(path.split('/'))
+    
+    def get_prefix(depth, is_last_at_level):
+        """Generate tree prefix based on depth and position."""
+        if depth == 0:
+            return ""
+        
+        prefix_parts = []
+        for i in range(depth - 1):
+            prefix_parts.append("│   ")
+        
+        if is_last_at_level:
+            prefix_parts.append("└── ")
+        else:
+            prefix_parts.append("├── ")
+        
+        return ''.join(prefix_parts)
+    
+    def should_show_depth(depth):
+        """Check if we should show this depth level."""
+        if max_depth is None:
+            return True
+        return depth <= max_depth
+    
+    #collect all items (dirs and files) with their paths for proper ordering
+    all_items = []
+    
+    #add directories
+    for dir_path in sorted_dirs:
+        depth = get_depth(dir_path)
+        if should_show_depth(depth):
+            all_items.append({
+                'type': 'dir',
+                'path': dir_path,
+                'name': dir_path.split('/')[-1],
+                'depth': depth,
+                'parent': '/'.join(dir_path.split('/')[:-1]) if '/' in dir_path else ''
+            })
+    
+    #add files
+    for dir_path, filenames in dir_structure.items():
+        depth = get_depth(dir_path) + 1 if dir_path else 1
+        if should_show_depth(depth):
+            for filename in sorted(filenames):
+                all_items.append({
+                    'type': 'file',
+                    'path': f"{dir_path}/{filename}" if dir_path else filename,
+                    'name': filename,
+                    'depth': depth,
+                    'parent': dir_path
+                })
+    
+    #sort all items by path for proper tree ordering
+    all_items.sort(key=lambda x: x['path'].lower())
+    
+    #group items by parent to determine last item at each level
+    items_by_parent = defaultdict(list)
+    for item in all_items:
+        items_by_parent[item['parent']].append(item)
+    
+    #track ancestors' "is_last" status for proper prefix
+    def build_tree_recursive(parent_path, ancestor_is_last):
+        """Recursively build tree lines."""
+        items = items_by_parent.get(parent_path, [])
+        
+        for idx, item in enumerate(items):
+            is_last = (idx == len(items) - 1)
+            depth = item['depth']
+            
+            #build prefix
+            prefix_parts = []
+            for i, was_last in enumerate(ancestor_is_last):
+                if was_last:
+                    prefix_parts.append("    ")
+                else:
+                    prefix_parts.append("│   ")
+            
+            if is_last:
+                prefix_parts.append("└── ")
+            else:
+                prefix_parts.append("├── ")
+            
+            prefix = ''.join(prefix_parts)
+            
+            if item['type'] == 'dir':
+                tree_lines.append(f"{prefix}{item['name']}/")
+                #recurse into this directory
+                build_tree_recursive(item['path'], ancestor_is_last + [is_last])
+            else:
+                tree_lines.append(f"{prefix}{item['name']}")
+    
+    #start building from root level
+    build_tree_recursive('', [])
+    
+    return '\n'.join(tree_lines)
+
+
+def create_project_structure_section(tree_content, file_count, total_dirs):
+    """Create the XML project_structure section."""
+    lines = [
+        '  <project_structure>',
+        f'    <summary files="{file_count}" directories="{total_dirs}"/>',
+        '    <tree><![CDATA[',
+        tree_content,
+        '    ]]></tree>',
+        '  </project_structure>',
+    ]
+    return '\n'.join(lines)
+
+
+def count_directories(files, base_path):
+    """Count unique directories containing the matched files."""
+    dirs = set()
+    for file_path in files:
+        try:
+            relative = file_path.relative_to(base_path)
+            parent = str(relative.parent).replace('\\', '/')
+            if parent != '.':
+                #add all parent directories
+                parts = parent.split('/')
+                for i in range(len(parts)):
+                    dirs.add('/'.join(parts[:i+1]))
+        except ValueError:
+            pass
+    return len(dirs)
+
+
 #=============================================================================
 #compress mode functions - extract structural elements only
 #=============================================================================
@@ -1014,7 +1190,7 @@ def create_code_snippet(file_path, counter, recursive, base_path, compress=False
     return '\n'.join(xml_parts)
 
 
-def create_metadata(folder_path, file_count, start_num, recursive, compress=False, chunk_num=None, total_chunks=None):
+def create_metadata(folder_path, file_count, start_num, recursive, compress=False, chunk_num=None, total_chunks=None, include_tree=False):
     """Create metadata section."""
     timestamp = datetime.now().astimezone().strftime('%Y-%m-%dT%H:%M:%SZ')
     
@@ -1026,6 +1202,7 @@ def create_metadata(folder_path, file_count, start_num, recursive, compress=Fals
         f'    <starting_number>{start_num}</starting_number>',
         f'    <recursive>{str(recursive).lower()}</recursive>',
         f'    <compress_mode>{str(compress).lower()}</compress_mode>',
+        f'    <includes_tree>{str(include_tree).lower()}</includes_tree>',
     ]
     
     if compress:
@@ -1038,13 +1215,17 @@ def create_metadata(folder_path, file_count, start_num, recursive, compress=Fals
     return '\n'.join(lines)
 
 
-def write_chunk(output_file, root_tag, content_lines, folder_path, file_count, start_num, recursive, compress=False, chunk_num=None, total_chunks=None):
+def write_chunk(output_file, root_tag, content_lines, folder_path, file_count, start_num, recursive, compress=False, chunk_num=None, total_chunks=None, tree_section=None):
     """Write a single chunk file."""
     xml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         f'<{root_tag}>',
-        create_metadata(folder_path, file_count, start_num, recursive, compress, chunk_num, total_chunks),
+        create_metadata(folder_path, file_count, start_num, recursive, compress, chunk_num, total_chunks, include_tree=(tree_section is not None)),
     ]
+    
+    #add project structure tree if provided (only in first chunk)
+    if tree_section:
+        xml_lines.append(tree_section)
     
     xml_lines.extend(content_lines)
     xml_lines.append(f'</{root_tag}>')
@@ -1064,6 +1245,7 @@ Examples:
   %(prog)s /path/to/project --filter-ext kt
   %(prog)s /path/to/project --compress --filter-ext kt kts
   %(prog)s . --compress --max-tokens 30000
+  %(prog)s /path/to/project --include-tree --filter-ext kt java xml
 
 Compress mode extracts only structural elements:
   - Class/object/interface declarations
@@ -1071,6 +1253,11 @@ Compress mode extracts only structural elements:
   - Property declarations (Kotlin)
   - Return statements
   - Import statements (condensed)
+
+Directory tree mode (--include-tree):
+  - Adds ASCII project structure to output
+  - Helps AI understand project organization
+  - Only included in first chunk (multi-chunk outputs)
 
 Supported languages for compression:
   - Kotlin (.kt, .kts)
@@ -1130,6 +1317,17 @@ Supported languages for compression:
         help='Enable compress mode: extract only classes, functions, interfaces, and returns'
     )
     parser.add_argument(
+        '--include-tree',
+        action='store_true',
+        help='Include AI-friendly directory structure tree in output'
+    )
+    parser.add_argument(
+        '--tree-depth',
+        type=int,
+        default=None,
+        help='Maximum depth for directory tree (default: unlimited)'
+    )
+    parser.add_argument(
         '--output-prefix',
         default='codesnippet',
         help='Prefix for output files (default: codesnippet)'
@@ -1185,6 +1383,16 @@ Supported languages for compression:
     if args.compress:
         print("Compress mode: extracting classes, functions, interfaces, returns")
     
+    #generate directory tree if requested
+    tree_section = None
+    tree_tokens = 0
+    if args.include_tree:
+        tree_content = generate_directory_tree(files, folder_path, args.tree_depth)
+        total_dirs = count_directories(files, folder_path)
+        tree_section = create_project_structure_section(tree_content, len(files), total_dirs)
+        tree_tokens = estimate_tokens(tree_section)
+        print(f"Directory tree: {total_dirs} directories (~{tree_tokens:,} tokens)")
+    
     #process files and split into chunks
     chunks = []
     current_chunk = []
@@ -1194,8 +1402,9 @@ Supported languages for compression:
     large_standalone_files = []
     total_reduction = []
     
-    #estimate overhead for XML structure
-    overhead_tokens = 500
+    #estimate overhead for XML structure (increased if tree is included in first chunk)
+    base_overhead_tokens = 500
+    first_chunk_overhead = base_overhead_tokens + tree_tokens if args.include_tree else base_overhead_tokens
     
     for file_path in files:
         snippet = create_code_snippet(file_path, counter, args.recursive, folder_path, args.compress)
@@ -1209,8 +1418,12 @@ Supported languages for compression:
                 reduction = (1 - snippet_tokens / original_tokens) * 100
                 total_reduction.append(reduction)
         
+        #determine overhead for current chunk (first chunk may include tree)
+        is_first_chunk = len(chunks) == 0
+        current_overhead = first_chunk_overhead if is_first_chunk and not current_chunk else base_overhead_tokens
+        
         #check if this single file exceeds the limit
-        if snippet_tokens + overhead_tokens > args.max_tokens:
+        if snippet_tokens + current_overhead > args.max_tokens:
             #file is too large for any chunk - put it in its own chunk
             if current_chunk:
                 #save current chunk first
@@ -1240,7 +1453,7 @@ Supported languages for compression:
             continue
         
         #check if adding this file would exceed limit
-        if current_tokens + snippet_tokens + overhead_tokens > args.max_tokens and current_chunk:
+        if current_tokens + snippet_tokens + current_overhead > args.max_tokens and current_chunk:
             #save current chunk and start new one
             chunks.append({
                 'content': current_chunk,
@@ -1280,15 +1493,20 @@ Supported languages for compression:
             chunks[0]['file_count'],
             args.start_num,
             args.recursive,
-            args.compress
+            args.compress,
+            tree_section=tree_section  #include tree in single file
         )
         print(f"\n✅ Created {output_file}")
         print(f"   Files: {chunks[0]['file_count']}")
+        if args.include_tree:
+            print(f"   Includes: directory tree")
         print(f"   Estimated tokens: ~{estimate_tokens(open(output_file).read()):,}")
     else:
         #multiple chunks
         for i, chunk in enumerate(chunks, 1):
             output_file = f'{args.output_prefix}{compress_suffix}_part{i}_of_{total_chunks}.text'
+            #only include tree in first chunk
+            chunk_tree = tree_section if i == 1 else None
             write_chunk(
                 output_file,
                 args.root_tag,
@@ -1299,12 +1517,15 @@ Supported languages for compression:
                 args.recursive,
                 args.compress,
                 i,
-                total_chunks
+                total_chunks,
+                tree_section=chunk_tree
             )
             tokens = estimate_tokens(open(output_file).read())
             print(f"\n✅ Created {output_file}")
             print(f"   Files: {chunk['file_count']}")
             print(f"   Code tags: <code{chunk['start_num']}> to <code{chunk['start_num'] + chunk['file_count'] - 1}>")
+            if i == 1 and args.include_tree:
+                print(f"   Includes: directory tree")
             print(f"   Estimated tokens: ~{tokens:,}")
     
     print(f"\n📊 Summary:")
@@ -1312,6 +1533,7 @@ Supported languages for compression:
     print(f"   Total chunks created: {total_chunks}")
     print(f"   Recursive mode: {args.recursive}")
     print(f"   Compress mode: {args.compress}")
+    print(f"   Directory tree: {args.include_tree}")
     
     if args.compress and total_reduction:
         avg_reduction = sum(total_reduction) / len(total_reduction)
@@ -1327,6 +1549,8 @@ Supported languages for compression:
     
     if total_chunks > 1:
         print(f"\n💡 Tip: Upload files to AI in order (part1, part2, etc.)")
+        if args.include_tree:
+            print(f"   Directory tree is only in part1 for context efficiency")
 
 
 if __name__ == '__main__':
