@@ -229,6 +229,87 @@ def detect_language(filename):
 #git integration - diffs and commit logs
 #=============================================================================
 
+def parse_commits_arg(value):
+    """
+    Parse --commits argument value.
+    
+    Supports:
+    - Plain number: "10" -> count=10, since=None
+    - Days suffix: "7d" -> count=None, since="7 days ago"
+    - Weeks suffix: "2w" -> count=None, since="14 days ago"
+    - Months suffix: "1m" -> count=None, since="30 days ago"
+    
+    Args:
+        value: String value from --commits argument (or None)
+    
+    Returns:
+        dict: {
+            'count': int or None,
+            'since': str or None (git --since value),
+            'display': str (human-readable description)
+        }
+    """
+    if value is None:
+        return {'count': None, 'since': None, 'display': None}
+    
+    value = value.strip().lower()
+    
+    #check for time suffix
+    if value.endswith('d'):
+        try:
+            days = int(value[:-1])
+            day_word = 'day' if days == 1 else 'days'
+            return {
+                'count': None,
+                'since': f'{days} days ago',
+                'display': f'last {days} {day_word}'
+            }
+        except ValueError:
+            pass
+    
+    if value.endswith('w'):
+        try:
+            weeks = int(value[:-1])
+            days = weeks * 7
+            week_word = 'week' if weeks == 1 else 'weeks'
+            return {
+                'count': None,
+                'since': f'{days} days ago',
+                'display': f'last {weeks} {week_word}'
+            }
+        except ValueError:
+            pass
+    
+    if value.endswith('m'):
+        try:
+            months = int(value[:-1])
+            days = months * 30
+            month_word = 'month' if months == 1 else 'months'
+            return {
+                'count': None,
+                'since': f'{days} days ago',
+                'display': f'last {months} {month_word}'
+            }
+        except ValueError:
+            pass
+    
+    #plain number = count
+    try:
+        count = int(value)
+        return {
+            'count': count,
+            'since': None,
+            'display': f'{count} commits'
+        }
+    except ValueError:
+        #invalid format, default to 10
+        return {
+            'count': 10,
+            'since': None,
+            'display': '10 commits (default)'
+        }
+
+
 def is_git_repository(path):
     """
     Check if path is inside a git repository.
@@ -421,19 +502,21 @@ def get_git_logs(path, count=50, oneline=True):
     return result
 
 
-def get_git_logs_with_diffs(path, count=10):
+def get_git_logs_with_diffs(path, count=10, since=None):
     """
     Get recent commit logs with diff for each commit.
     
     Args:
         path: Path to git repository
-        count: Number of commits to retrieve (default 10, keep low due to size)
+        count: Number of commits to retrieve (default 10, ignored if since is set)
+        since: Git --since value (e.g., "7 days ago"), overrides count if set
     
     Returns:
         dict: {
             'success': bool,
             'commits': list of {hash, date, subject, diff},
             'commit_count': int,
+            'since_filter': str or None,
             'error': str or None
         }
     """
@@ -441,13 +524,20 @@ def get_git_logs_with_diffs(path, count=10):
         'success': False,
         'commits': [],
         'commit_count': 0,
+        'since_filter': since,
         'error': None
     }
     
     try:
         #first get list of commit hashes with metadata
         format_str = '%h||%as||%s'  #hash||date||subject (using || as separator)
-        cmd = ['git', 'log', f'-{count}', f'--pretty=format:{format_str}']
+        cmd = ['git', 'log', f'--pretty=format:{format_str}']
+        
+        #use time-based or count-based filtering
+        if since is not None:
+            cmd.append(f'--since={since}')
+        else:
+            cmd.append(f'-{count}')
         
         log_result = subprocess.run(
             cmd,
@@ -2018,7 +2108,7 @@ def get_compression_stats(original, compressed):
 
 def estimate_tokens(text):
     """
-    Estimate token count (rough approximation: 1 token ≈ 4 characters).
+    Estimate token count (rough approximation: 1 token ~ 4 characters).
     Conservative estimate to be safe.
     """
     return len(text) // 3  #conservative estimate
@@ -2145,7 +2235,7 @@ def write_chunk(output_file, root_tag, content_lines, folder_path, file_count, s
         f.write('\n'.join(xml_lines))
 
 
-def write_git_file(output_file, folder_path, diff_result=None, logs_with_diffs_result=None, branch_diff_result=None, commits_count=10):
+def write_git_file(output_file, folder_path, diff_result=None, logs_with_diffs_result=None, branch_diff_result=None, commits_display=None):
     """Write git information to a separate file."""
     timestamp = datetime.now().astimezone().strftime('%Y-%m-%dT%H:%M:%SZ')
     
@@ -2167,7 +2257,9 @@ def write_git_file(output_file, folder_path, diff_result=None, logs_with_diffs_r
     
     if logs_with_diffs_result and logs_with_diffs_result.get('success'):
         xml_lines.append(f'    <commits_included>true</commits_included>')
-        xml_lines.append(f'    <commits_count>{commits_count}</commits_count>')
+        xml_lines.append(f'    <commits_count>{logs_with_diffs_result.get("commit_count", 0)}</commits_count>')
+        if commits_display:
+            xml_lines.append(f'    <commits_filter>{commits_display}</commits_filter>')
     
     xml_lines.append('  </metadata>')
     
@@ -2254,6 +2346,9 @@ Examples:
   %(prog)s /path/to/project --compress --filter-ext kt graphql graphqls
   %(prog)s /path/to/project --uncommitted
   %(prog)s /path/to/project --commits 5
+  %(prog)s /path/to/project --commits 7d
+  %(prog)s /path/to/project --commits 2w --compress
+  %(prog)s /path/to/project --commits 1m
   %(prog)s /path/to/project --changed-only --uncommitted
   %(prog)s /path/to/project --pr main --include-tree
 
@@ -2281,7 +2376,11 @@ Image handling:
 
 Commit history (--commits):
   - Shows full diff for each commit in history
-  - Use --commits N to limit (default: 10)
+  - Accepts count OR time suffix:
+    --commits 10    = last 10 commits
+    --commits 7d    = last 7 days
+    --commits 2w    = last 2 weeks
+    --commits 1m    = last 1 month
   - Useful for understanding recent changes
 
 Compress mode extracts only structural elements:
@@ -2299,7 +2398,7 @@ Directory tree mode (--include-tree):
 Git integration:
   - --pr <branch>: PR diff against target branch  
   - --uncommitted: Working directory changes
-  - --commits: Commit history with diffs
+  - --commits: Commit history (count or time-based)
   - Saved to separate file: {prefix}_git.text
 
 Supported languages for compression:
@@ -2379,12 +2478,9 @@ Supported languages for compression:
     )
     parser.add_argument(
         '--commits',
-        type=int,
-        nargs='?',
-        const=10,
-        default=None,
-        metavar='COUNT',
-        help='Include commit history with diffs (default: 10 commits)'
+        type=str,
+        metavar='COUNT|TIME',
+        help='Include commit history: NUMBER for count (e.g., 10), or NUMBER+SUFFIX for time (e.g., 7d=days, 2w=weeks, 1m=months)'
     )
     parser.add_argument(
         '--pr',
@@ -2442,7 +2538,7 @@ Supported languages for compression:
     if args.changed_only:
         is_repo, git_root, git_error = is_git_repository(folder_path)
         if not is_repo:
-            print(f"⚠️  Git: Not a git repository ({git_error or 'unknown error'})")
+            print(f"Warning: Git: Not a git repository ({git_error or 'unknown error'})")
             print("   --changed-only requires git, processing all files instead")
         else:
             changed_result = get_git_changed_files(folder_path)
@@ -2459,7 +2555,7 @@ Supported languages for compression:
                 print(f"Changed files: {len(changed_result['staged'])} staged, {len(changed_result['unstaged'])} unstaged, {len(changed_result['untracked'])} untracked")
                 print(f"Filtered to {len(files)} changed files (from {files_before})")
             else:
-                print(f"⚠️  Git status failed: {changed_result.get('error', 'Unknown error')}")
+                print(f"Warning: Git status failed: {changed_result.get('error', 'Unknown error')}")
                 print("   Processing all files instead")
     
     #apply filters
@@ -2521,11 +2617,14 @@ Supported languages for compression:
     logs_with_diffs_result = None
     branch_diff_result = None
     
+    #parse --commits argument (supports count or time suffix)
+    commits_config = parse_commits_arg(args.commits)
+    
     if args.uncommitted or args.commits or args.pr:
         is_repo, git_root, git_error = is_git_repository(folder_path)
         
         if not is_repo:
-            print(f"⚠️  Git: Not a git repository ({git_error or 'unknown error'})")
+            print(f"Warning: Git: Not a git repository ({git_error or 'unknown error'})")
             print("   Skipping git diffs and logs")
         else:
             print(f"Git repository: {git_root}")
@@ -2541,7 +2640,7 @@ Supported languages for compression:
                     dels = branch_diff_result['deletions']
                     print(f"Branch diff: {current} vs {target} ({bd_files} files, +{ins}/-{dels})")
                 else:
-                    print(f"⚠️  Branch diff: {branch_diff_result.get('error', 'Unknown error')}")
+                    print(f"Warning: Branch diff: {branch_diff_result.get('error', 'Unknown error')}")
             
             if args.uncommitted:
                 diff_result = get_git_diff(folder_path)
@@ -2551,15 +2650,20 @@ Supported languages for compression:
                     else:
                         print("Uncommitted changes: None")
                 else:
-                    print(f"⚠️  Git diffs: {diff_result.get('error', 'Unknown error')}")
+                    print(f"Warning: Git diffs: {diff_result.get('error', 'Unknown error')}")
             
-            #commit history with diffs
+            #commit history with diffs (by count or by time)
             if args.commits:
-                logs_with_diffs_result = get_git_logs_with_diffs(folder_path, args.commits)
+                logs_with_diffs_result = get_git_logs_with_diffs(
+                    folder_path, 
+                    count=commits_config['count'] or 100,
+                    since=commits_config['since']
+                )
                 if logs_with_diffs_result['success']:
-                    print(f"Commits with diffs: {logs_with_diffs_result['commit_count']} commits")
+                    print(f"Commits with diffs: {logs_with_diffs_result['commit_count']} commits ({commits_config['display']})")
                 else:
-                    print(f"⚠️  Commits: {logs_with_diffs_result.get('error', 'Unknown error')}")
+                    print(f"Warning: Commits: {logs_with_diffs_result.get('error', 'Unknown error')}")
+
     
     #process files and split into chunks
     chunks = []
@@ -2660,16 +2764,23 @@ Supported languages for compression:
         )
         if has_valid_git_data:
             git_output_file = f'{args.output_prefix}_git.text'
-            write_git_file(git_output_file, args.folder_path, diff_result, logs_with_diffs_result, branch_diff_result, args.commits or 10)
+            write_git_file(
+                git_output_file, 
+                args.folder_path, 
+                diff_result, 
+                logs_with_diffs_result, 
+                branch_diff_result, 
+                commits_display=commits_config['display'] if commits_config else None
+            )
             git_tokens = estimate_tokens(open(git_output_file).read())
-            print(f"\n✅ Created {git_output_file}")
+            print(f"\nCreated {git_output_file}")
             git_includes = []
             if branch_diff_result and branch_diff_result.get('success'):
                 git_includes.append(f"PR diff: {branch_diff_result['current_branch']} vs {branch_diff_result['target_branch']} ({branch_diff_result['files_changed']} files)")
             if diff_result and diff_result.get('success'):
                 git_includes.append(f"uncommitted ({diff_result['files_changed']} files)")
             if logs_with_diffs_result and logs_with_diffs_result.get('success'):
-                git_includes.append(f"commits ({logs_with_diffs_result['commit_count']} with diffs)")
+                git_includes.append(f"commits ({logs_with_diffs_result['commit_count']}, {commits_config['display']})")
             print(f"   Contains: {', '.join(git_includes)}")
             print(f"   Estimated tokens: ~{git_tokens:,}")
     
@@ -2688,7 +2799,7 @@ Supported languages for compression:
             tree_section=tree_section,
             images_section=images_section
         )
-        print(f"\n✅ Created {output_file}")
+        print(f"\nCreated {output_file}")
         print(f"   Files: {chunks[0]['file_count']}")
         includes = []
         if args.include_tree:
@@ -2720,7 +2831,7 @@ Supported languages for compression:
                 images_section=chunk_images
             )
             tokens = estimate_tokens(open(output_file).read())
-            print(f"\n✅ Created {output_file}")
+            print(f"\nCreated {output_file}")
             print(f"   Files: {chunk['file_count']}")
             print(f"   Code tags: <code{chunk['start_num']}> to <code{chunk['start_num'] + chunk['file_count'] - 1}>")
             if i == 1:
@@ -2733,7 +2844,7 @@ Supported languages for compression:
                     print(f"   Includes: {", ".join(includes)}")
             print(f"   Estimated tokens: ~{tokens:,}")
     
-    print(f"\n📊 Summary:")
+    print(f"\nSummary:")
     print(f"   Total code files: {len(files)}")
     if image_files:
         print(f"   Total images: {len(image_files)} (metadata only)")
@@ -2747,27 +2858,30 @@ Supported languages for compression:
     if args.pr:
         print(f"   PR diff: vs {args.pr}")
     print(f"   Uncommitted: {args.uncommitted}")
-    print(f"   Commits: {args.commits if args.commits else False}")
+    if args.commits:
+        print(f"   Commits: {commits_config['display']}")
+    else:
+        print(f"   Commits: False")
     
     if args.compress and total_reduction:
         avg_reduction = sum(total_reduction) / len(total_reduction)
         print(f"   Average token reduction: ~{avg_reduction:.1f}%")
     
     if large_standalone_files:
-        print(f"\n⚠️  Large files in dedicated chunks (exceed {args.max_tokens:,} tokens):")
+        print(f"\nWarning: Large files in dedicated chunks (exceed {args.max_tokens:,} tokens):")
         for lf in large_standalone_files[:10]:  #show first 10
-            print(f"   - {lf['path'].name} (~{lf['tokens']:,} tokens) → code{lf['code_num']} (dedicated chunk)")
+            print(f"   - {lf['path'].name} (~{lf['tokens']:,} tokens) -> code{lf['code_num']} (dedicated chunk)")
         if len(large_standalone_files) > 10:
             print(f"   ... and {len(large_standalone_files) - 10} more")
         print(f"\n   Note: These files are complete but in their own chunks")
     
     if total_chunks > 1:
-        print(f"\n💡 Tip: Upload files to AI in order (part1, part2, etc.)")
+        print(f"\nTip: Upload files to AI in order (part1, part2, etc.)")
         if args.include_tree:
             print(f"   Directory tree is only in part1 for context efficiency")
     
     if git_output_file:
-        print(f"\n💡 Git context is in separate file: {git_output_file}")
+        print(f"\nTip: Git context is in separate file: {git_output_file}")
         print(f"   Upload alongside code files for full context")
 
 
